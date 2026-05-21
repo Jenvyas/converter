@@ -1,52 +1,59 @@
-use std::{net::SocketAddrV4, path::PathBuf};
+use std::net::SocketAddr;
 
 use http_body_util::{BodyExt, Empty};
 use hyper::{
-    Request, Uri,
+    Request, StatusCode, Uri,
     body::{Buf, Bytes},
     client::conn::http1::SendRequest,
 };
 use hyper_util::rt::TokioIo;
 use openssl::ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
-use serde::Deserialize;
 use tokio::{net::TcpStream, task::JoinHandle};
 use tokio_openssl::SslStream;
+use tracing::error;
 
-pub enum SkipAuth {
-    Psk(Vec<u8>, Vec<u8>),
-    CaCrt(PathBuf),
-}
+use crate::config::SkipAuth;
+use crate::{
+    config::Psk,
+    skip::models::{Capabilities, Key},
+};
+
+pub mod models;
 
 pub struct SkipClient {
     ssl_ctx: SslContext,
     sender: SendRequest<Empty<Bytes>>,
-    kp_addr: SocketAddrV4,
+    kp_addr: SocketAddr,
     conn_handle: JoinHandle<()>,
 }
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type AResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 impl SkipClient {
-    pub async fn new(addr: SocketAddrV4, auth: SkipAuth) -> Result<SkipClient> {
+    pub async fn new(addr: SocketAddr, auth: SkipAuth) -> AResult<SkipClient> {
         let mut ctx = SslContextBuilder::new(SslMethod::tls())?;
         match auth {
-            SkipAuth::Psk(key_id, key) => ctx.set_psk_client_callback(move |_, _, psk_id, psk| {
-                psk_id[..key_id.len()].copy_from_slice(&key_id);
-                psk_id[key_id.len()] = 0;
+            SkipAuth::Psk(Psk { key, id }) => ctx.set_psk_client_callback(move |_, _, psk_id, psk| {
+                psk_id[..id.len()].copy_from_slice(&id);
+                psk_id[id.len()] = 0;
                 psk[..key.len()].copy_from_slice(&key);
                 Ok(key.len())
             }),
-            SkipAuth::CaCrt(path_buf) =>  {
-                ctx.set_certificate_chain_file(path_buf)?;
+            SkipAuth::RootCertificate(path) => {
+                ctx.set_ca_file(&path)
+                    .map_err(|err| format!("Error while trying to open '{}': '{}'", path.display(), err))?;
                 ctx.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-            },
+            }
         }
 
         ctx.set_min_proto_version(Some(SslVersion::TLS1_2))?;
 
         let ssl_ctx = ctx.build();
 
-        let (conn_handle, sender) = Self::create_connection(&ssl_ctx, &addr).await?;
+        let (conn_handle, sender) = Self::create_connection(&ssl_ctx, &addr).await.map_err(|err| {
+            error!("Error while trying to connect to key provider at '{}': '{}'", addr, err);
+            err
+        })?;
 
         Ok(SkipClient {
             ssl_ctx,
@@ -58,8 +65,8 @@ impl SkipClient {
 
     async fn create_connection(
         ssl_ctx: &SslContext,
-        addr: &SocketAddrV4,
-    ) -> Result<(tokio::task::JoinHandle<()>, SendRequest<Empty<Bytes>>)> {
+        addr: &SocketAddr,
+    ) -> AResult<(tokio::task::JoinHandle<()>, SendRequest<Empty<Bytes>>)> {
         let stream = TcpStream::connect(addr).await?;
         let stream = SslStream::new(Ssl::new(ssl_ctx)?, stream)?;
 
@@ -75,12 +82,15 @@ impl SkipClient {
         Ok((conn_handle, sender))
     }
 
-    async fn check_connection(&mut self) -> Result<()> {
+    async fn check_connection(&mut self) -> Result<(), StatusCode> {
         if !self.conn_handle.is_finished() {
             return Ok(());
         }
 
-        let (conn_handle, sender) = Self::create_connection(&self.ssl_ctx, &self.kp_addr).await?;
+        let (conn_handle, sender) = Self::create_connection(&self.ssl_ctx, &self.kp_addr).await.map_err(|e| {
+            error!("Error while reestablishing connection to '{}': '{}'", self.kp_addr, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         self.conn_handle = conn_handle;
         self.sender = sender;
@@ -88,73 +98,79 @@ impl SkipClient {
         Ok(())
     }
 
-    async fn fetch_json<T>(&mut self, url: Uri) -> Result<T>
+    async fn fetch_json<T>(&mut self, url: Uri) -> Result<T, StatusCode>
     where
         T: serde::de::DeserializeOwned,
     {
         self.check_connection().await?;
 
         let req = Request::builder()
-            .uri(url)
+            .uri(url.clone())
             .header(hyper::header::HOST, self.kp_addr.to_string())
-            .body(Empty::<Bytes>::new())?;
+            .body(Empty::<Bytes>::new())
+            .map_err(|e| {
+                error!("Error while creating SKIP request to '{}': '{}'", url, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
-        let res = self.sender.send_request(req).await?;
+        let res = self.sender.send_request(req).await.map_err(|e| {
+            error!("Error while sending a SKIP request to '{}': '{}'", url, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-        let body = res.collect().await?.aggregate();
+        let body = res
+            .collect()
+            .await
+            .map_err(|e| {
+                error!("Error while receiving response from '{}': '{}'", url, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .aggregate();
 
-        Ok(serde_json::from_reader(body.reader())?)
+        Ok(serde_json::from_reader(body.reader()).map_err(|e| {
+            error!("Error while parsing SKIP response from '{}': '{}'", url, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?)
     }
 
-    pub async fn fetch_key(&mut self, remote_system_id: &str, size: Option<u16>) -> Result<Key> {
+    pub async fn fetch_key(&mut self, remote_system_id: &str, size: Option<usize>) -> Result<Key, StatusCode> {
         let mut p_and_q = format!("/key?remoteSystemId={remote_system_id}");
 
         if let Some(size) = size {
             p_and_q = format!("{}&size={size}", p_and_q);
         }
 
-        let url = Uri::builder()
-            .scheme("https")
-            .path_and_query(p_and_q)
-            .build()?;
+        let url = Uri::builder().scheme("https").path_and_query(p_and_q).build().map_err(|e| {
+            error!("Invalid requested uri: '{}'", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         self.fetch_json(url).await
     }
 
-    pub async fn fetch_peer_key(&mut self, remote_system_id: &str, key_id: &str) -> Result<Key> {
+    pub async fn fetch_peer_key(&mut self, remote_system_id: &str, key_id: &str) -> Result<Key, StatusCode> {
         let p_and_q = format!("/key/{key_id}?remoteSystemId={remote_system_id}");
 
-        let url = Uri::builder()
-            .scheme("https")
-            .path_and_query(p_and_q)
-            .build()?;
+        let url = Uri::builder().scheme("https").path_and_query(p_and_q).build().map_err(|e| {
+            error!("Invalid requested uri: '{}'", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         self.fetch_json(url).await
     }
 
-    pub async fn fetch_capabilities(&mut self) -> Result<Capabilities> {
+    pub async fn fetch_capabilities(&mut self) -> Result<Capabilities, StatusCode> {
         let url = Uri::builder()
             .scheme("https")
             .path_and_query("/capabilities")
-            .build()?;
+            .build()
+            .map_err(|e| {
+                error!("Invalid requested uri: '{}'", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         let capabilities = self.fetch_json(url).await?;
 
         Ok(capabilities)
     }
-}
-
-#[derive(Deserialize)]
-pub struct Capabilities {
-    pub entropy: bool,
-    pub key: bool,
-    pub algorithm: String,
-    pub local_system_id: String,
-    pub remote_system_id: Vec<String>,
-}
-
-#[derive(Deserialize)]
-pub struct Key {
-    pub key_id: String,
-    pub key: String,
 }

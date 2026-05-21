@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package converter;
+
+service EtsiToSkipConverter {
+    rpc NewKeys (stream NewKey) returns (google.protobuf.Empty);
+    rpc GetConnectedSae (google.protobuf.Empty) returns (stream SaeId);
+}
+
+message ConverterUp {
+    string id = 1;
+}
+
+message SaeId {
+    string id = 1;
+}
+
+// Metadata must include a master_sae_id, slave_sae_id pair
+message NewKey {
+    string id = 3;
+}

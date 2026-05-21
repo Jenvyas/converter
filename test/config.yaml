@@ -1,0 +1,14 @@
+skip_client:
+  address: 127.0.0.1:1203
+  auth: !RootCertificate './certs/ca.cert.pem'
+etsi_server:
+  address: 0.0.0.0:3333
+  cert: './certs/etsi_server1.cert.pem'
+  key: './certs/etsi_server1.key.pem'
+  sae_ids: ['bob1','bob2']
+  sae_root_certs: ['./certs/ca.cert.pem']
+converter:
+  address: 0.0.0.0:3334
+  cert: './certs/converter1.cert.pem'
+  key: './certs/converter1.key.pem'
+  root_certs: ['./certs/ca.cert.pem']
