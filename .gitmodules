@@ -1,3 +1,3 @@
-[submode "test/skip-sim"]
+[submodule "test/skip-sim"]
     path = test/skip-sim
     url = https://codeberg.org/Jenvy/skip-sim.git
