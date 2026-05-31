@@ -1,6 +1,6 @@
 skip_client:
-  address: 127.0.0.1:1203
-  auth: !RootCertificate './certs/ca.cert.pem'
+  address: 127.0.0.1:2026
+  auth: !RootCertificate './test/skip-sim/certs/ca.cert.pem'
 etsi_server:
   address: 0.0.0.0:3333
   cert: './certs/etsi_server1.cert.pem'
