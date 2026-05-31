@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, pin::Pin};
 
 use http_body_util::{BodyExt, Empty};
 use hyper::{
@@ -7,7 +7,7 @@ use hyper::{
     client::conn::http1::SendRequest,
 };
 use hyper_util::rt::TokioIo;
-use openssl::ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
+use openssl::ssl::{Ssl, SslConnector, SslMethod, SslVerifyMode, SslVersion};
 use tokio::{net::TcpStream, task::JoinHandle};
 use tokio_openssl::SslStream;
 use tracing::error;
@@ -21,7 +21,7 @@ use crate::{
 pub mod models;
 
 pub struct SkipClient {
-    ssl_ctx: SslContext,
+    ssl_ctx: SslConnector,
     sender: SendRequest<Empty<Bytes>>,
     kp_addr: SocketAddr,
     conn_handle: JoinHandle<()>,
@@ -31,7 +31,7 @@ type AResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync
 
 impl SkipClient {
     pub async fn new(addr: SocketAddr, auth: SkipAuth) -> AResult<SkipClient> {
-        let mut ctx = SslContextBuilder::new(SslMethod::tls())?;
+        let mut ctx = SslConnector::builder(SslMethod::tls())?;
         match auth {
             SkipAuth::Psk(Psk { key, id }) => ctx.set_psk_client_callback(move |_, _, psk_id, psk| {
                 psk_id[..id.len()].copy_from_slice(&id);
@@ -49,8 +49,10 @@ impl SkipClient {
         ctx.set_min_proto_version(Some(SslVersion::TLS1_2))?;
 
         let ssl_ctx = ctx.build();
+        let ssl = ssl_ctx.configure()?.into_ssl("localhost")?;
 
-        let (conn_handle, sender) = Self::create_connection(&ssl_ctx, &addr).await.map_err(|err| {
+
+        let (conn_handle, sender) = Self::create_connection(ssl, &addr).await.map_err(|err| {
             error!("Error while trying to connect to key provider at '{}': '{}'", addr, err);
             err
         })?;
@@ -64,11 +66,12 @@ impl SkipClient {
     }
 
     async fn create_connection(
-        ssl_ctx: &SslContext,
+        ssl: Ssl,
         addr: &SocketAddr,
     ) -> AResult<(tokio::task::JoinHandle<()>, SendRequest<Empty<Bytes>>)> {
         let stream = TcpStream::connect(addr).await?;
-        let stream = SslStream::new(Ssl::new(ssl_ctx)?, stream)?;
+        let mut stream = SslStream::new(ssl, stream)?;
+        Pin::new(&mut stream).connect().await?;
 
         let io = TokioIo::new(stream);
         let (sender, conn) = hyper::client::conn::http1::handshake(io).await?;
@@ -87,7 +90,9 @@ impl SkipClient {
             return Ok(());
         }
 
-        let (conn_handle, sender) = Self::create_connection(&self.ssl_ctx, &self.kp_addr).await.map_err(|e| {
+        let ssl = self.ssl_ctx.configure().unwrap().into_ssl("localhost").unwrap();
+
+        let (conn_handle, sender) = Self::create_connection(ssl, &self.kp_addr).await.map_err(|e| {
             error!("Error while reestablishing connection to '{}': '{}'", self.kp_addr, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
@@ -140,7 +145,7 @@ impl SkipClient {
             p_and_q = format!("{}&size={size}", p_and_q);
         }
 
-        let url = Uri::builder().scheme("https").path_and_query(p_and_q).build().map_err(|e| {
+        let url = Uri::builder().scheme("https").authority(self.kp_addr.to_string()).path_and_query(p_and_q).build().map_err(|e| {
             error!("Invalid requested uri: '{}'", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
@@ -151,7 +156,7 @@ impl SkipClient {
     pub async fn fetch_peer_key(&mut self, remote_system_id: &str, key_id: &str) -> Result<Key, StatusCode> {
         let p_and_q = format!("/key/{key_id}?remoteSystemId={remote_system_id}");
 
-        let url = Uri::builder().scheme("https").path_and_query(p_and_q).build().map_err(|e| {
+        let url = Uri::builder().scheme("https").authority(self.kp_addr.to_string()).path_and_query(p_and_q).build().map_err(|e| {
             error!("Invalid requested uri: '{}'", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
@@ -162,6 +167,7 @@ impl SkipClient {
     pub async fn fetch_capabilities(&mut self) -> Result<Capabilities, StatusCode> {
         let url = Uri::builder()
             .scheme("https")
+            .authority(self.kp_addr.to_string())
             .path_and_query("/capabilities")
             .build()
             .map_err(|e| {

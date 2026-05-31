@@ -59,7 +59,7 @@ pub async fn etsi_to_skip_converter(
     let root_store = Arc::new(root_store);
     let ctx = EtsiToSkipContext::new(
         sae_ids,
-        capabilities.local_system_id,
+        capabilities.localSystemID,
         root_store.clone(),
         cert_chain.clone(),
         key.clone_key(),
@@ -182,7 +182,7 @@ async fn handle_etsi_request(
 
             // Default status response, TODO: extract status info from the Skip KP.
             let _ = sender.send(Ok(Status {
-                source_KME_ID: capabilities.local_system_id,
+                source_KME_ID: capabilities.localSystemID,
                 target_KME_ID: peer_key_provider,
                 master_SAE_ID: sae_id,
                 slave_SAE_ID: remote_sae_id,
@@ -203,7 +203,7 @@ async fn handle_etsi_request(
                 match key {
                     Ok(key) => {
                         keys.push(Key {
-                            key_ID: key.key_id,
+                            key_ID: key.keyId,
                             key: key.key,
                         });
                     }
@@ -232,9 +232,9 @@ async fn handle_etsi_request(
                 let res = skip_client.fetch_peer_key(&peer_key_provider, &key.key_ID).await;
                 match res {
                     Ok(key) => {
-                        ctx.remove_key(&sae_pair, &key.key_id).await;
+                        ctx.remove_key(&sae_pair, &key.keyId).await;
                         keys.push(Key {
-                            key_ID: key.key_id,
+                            key_ID: key.keyId,
                             key: key.key,
                         });
                     }
