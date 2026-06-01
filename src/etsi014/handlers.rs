@@ -4,6 +4,7 @@ use axum::{
 };
 use hyper::StatusCode;
 use tokio::sync::oneshot;
+use tracing::error;
 
 use crate::etsi014::{E014ConverterRequest, E014ConverterRequestInner};
 
@@ -41,7 +42,10 @@ pub async fn get_key(
         .send(E014ConverterRequest::new(req, state.sae_id, slave_sae_id))
         .await;
 
-    rx.await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.map(|a| a.into())
+    rx.await.map_err(|e| {
+        error!("Sender dropped: {}",e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?.map(|a| a.into())
 }
 
 #[debug_handler]

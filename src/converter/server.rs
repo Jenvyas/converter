@@ -6,7 +6,8 @@ use super::rpc;
 use super::rpc::etsi_to_skip_converter_server::EtsiToSkipConverter;
 use rpc::NewKey;
 use tokio_stream::Stream;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status, Streaming, metadata::MetadataValue};
+use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub(super) struct EtsiToSkipConverterService {
@@ -34,12 +35,16 @@ impl EtsiToSkipConverter for EtsiToSkipConverterService {
 
         let sae_pair = match (master_sae_id, slave_sae_id) {
             (Some(id0), Some(id1)) => (id0, id1),
-            _ => return Err(Status::unauthenticated("No SAE ID pair provided.")),
+            _ => {
+                error!("No SAE ID pair provided in metadata.");
+                return Err(Status::unauthenticated("No SAE ID pair provided."));
+            },
         };
 
         let mut new_keys = Vec::new();
 
         while let Some(key) = stream.message().await? {
+            info!("Received new key ID '{}' for SAE pair ('{}','{}')", key.id, sae_pair.0, sae_pair.1);
             new_keys.push(key.id);
         }
 
@@ -51,17 +56,8 @@ impl EtsiToSkipConverter for EtsiToSkipConverterService {
     type GetConnectedSaeStream = Pin<Box<dyn Stream<Item = Result<SaeId, Status>> + Send>>;
 
     async fn get_connected_sae(&self, request: Request<()>) -> Result<Response<Self::GetConnectedSaeStream>, Status> {
-        let ProviderExtension { id } = request.extensions().get().unwrap();
-        match request.remote_addr() {
-            Some(addr) => {
-                let _ = self.context.add_peer(id, addr).await;
-            }
-            None => return Err(Status::failed_precondition("Converter only supports network sockets")),
-        }
-
         let connected_sae = self.context.connected_sae().into_iter().map(|id| Ok(id));
         let stream = Box::pin(tokio_stream::iter(connected_sae));
-
         Ok(Response::new(stream))
     }
 }

@@ -1,0 +1,16 @@
+skip_client:
+  address: 127.0.0.1:2027
+  auth: !RootCertificate './test/skip-sim/certs/ca.cert.pem'
+etsi_server:
+  address: 0.0.0.0:4444
+  cert: './certs/etsi_server2.cert.pem'
+  key: './certs/etsi_server2.key.pem'
+  sae_ids: ['bob2']
+  sae_root_certs: ['./certs/ca.cert.pem']
+converter:
+  address: 0.0.0.0:3335
+  cert: './certs/converter2.cert.pem'
+  key: './certs/converter2.key.pem'
+  root_certs: ['./certs/ca.cert.pem']
+  peer_address: 127.0.0.1:3334
+  peer_provider_id: 'Alice'

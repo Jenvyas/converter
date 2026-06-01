@@ -2,7 +2,7 @@ days = 365
 
 new_cert = config/certs.conf ca
 
-allcerts: ca converter1 converter2 etsi_server1 etsi_server2
+allcerts: ca converter1 converter2 etsi_server1 etsi_server2 sae1 sae2
 
 .PHONY: certs clean converter1 converter2 etsi_server1 etsi_server2
 
@@ -43,6 +43,21 @@ etsi_server2.cert.pem etsi_server2.key.pem &: $(new_cert)
 		-extensions v3_etsi_server2 -extfile config/certs.conf
 	rm etsi_server2.req
 
+sae1: sae1.cert.pem sae1.key.pem
+
+sae1.cert.pem sae1.key.pem &: $(new_cert)
+	openssl req -noenc -newkey rsa:4096 -keyout sae1.key.pem -out sae1.req -sha256 -batch -subj "/CN=localhost"
+	openssl x509 -req -in sae1.req -out sae1.cert.pem -CA ca.cert.pem -CAkey ca.key.pem -sha256 -days $(days) -set_serial 5 \
+		-extensions v3_sae1 -extfile config/certs.conf
+	rm sae1.req
+
+sae2: sae2.cert.pem sae2.key.pem
+
+sae2.cert.pem sae2.key.pem &: $(new_cert)
+	openssl req -noenc -newkey rsa:4096 -keyout sae2.key.pem -out sae2.req -sha256 -batch -subj "/CN=localhost"
+	openssl x509 -req -in sae2.req -out sae2.cert.pem -CA ca.cert.pem -CAkey ca.key.pem -sha256 -days $(days) -set_serial 6 \
+		-extensions v3_sae2 -extfile config/certs.conf
+	rm sae2.req
 
 clean:
 	-rm -f *.pem

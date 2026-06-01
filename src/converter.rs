@@ -10,7 +10,7 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tokio_rustls::TlsAcceptor;
 use tonic::{body::Body, service::Routes};
 use tower::ServiceExt;
-use tracing::error;
+use tracing::{error, info};
 
 pub mod rpc {
     tonic::include_proto!("converter");
@@ -50,6 +50,7 @@ pub async fn etsi_to_skip_converter(
         key,
         peer_address,
         root_store,
+        peer_provider_id,
     } = config;
 
     let capabilities = skip_client
@@ -124,23 +125,23 @@ pub async fn etsi_to_skip_converter(
     });
 
     // Connect to a peer converter if an address is provided
-    if let Some(addr) = peer_address {
-        if let Err(e) = ctx.connect_to_peer(addr).await {
-            error!("Failed to connect to converter peer '{}': '{}'", addr, e);
-            return Err(e);
-        }
+    if let Err(e) = ctx.connect_to_peer(config.peer_address, peer_provider_id).await {
+        error!("Failed to connect to converter peer '{}': '{}'", config.peer_address, e);
+        return Err(e);
     }
 
     loop {
         tokio::select! {
             request = etsi_receiver.recv() => {
                 match request {
-                    Some(request) => handle_etsi_request(ctx.clone(), &mut skip_client, request).await?,
+                    Some(request) => {let _ = handle_etsi_request(ctx.clone(), &mut skip_client, request).await;},
                     None => break,
                 };
             }
         }
     }
+
+    error!("Converter handler dropped");
 
     Ok(())
 }
@@ -157,11 +158,14 @@ async fn handle_etsi_request(
         req,
     } = request;
 
+    info!("Handling request from {}", sae_id);
+
     let peer_key_provider = match ctx.remote_sae_provider(&remote_sae_id).await {
         Some(peer_key_provider) => peer_key_provider.to_owned(),
         None => {
             req.send_error(StatusCode::NOT_FOUND);
-            return Err("Invalid Peer Id".into());
+            error!("Couldn't find key provider for SAE '{remote_sae_id}' ");
+            return Ok(());
         }
     };
 
@@ -202,6 +206,10 @@ async fn handle_etsi_request(
                 let key = skip_client.fetch_key(&peer_key_provider, enc_key_request.size).await;
                 match key {
                     Ok(key) => {
+                        info!(
+                            "Got new key with ID '{}', for SAE pair ('{}', '{}')",
+                            key.keyId, sae_pair.0, sae_pair.1
+                        );
                         keys.push(Key {
                             key_ID: key.keyId,
                             key: key.key,

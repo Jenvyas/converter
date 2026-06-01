@@ -139,7 +139,7 @@ impl SkipClient {
     }
 
     pub async fn fetch_key(&mut self, remote_system_id: &str, size: Option<usize>) -> Result<Key, StatusCode> {
-        let mut p_and_q = format!("/key?remoteSystemId={remote_system_id}");
+        let mut p_and_q = format!("/key?remoteSystemID={remote_system_id}");
 
         if let Some(size) = size {
             p_and_q = format!("{}&size={size}", p_and_q);
@@ -154,7 +154,7 @@ impl SkipClient {
     }
 
     pub async fn fetch_peer_key(&mut self, remote_system_id: &str, key_id: &str) -> Result<Key, StatusCode> {
-        let p_and_q = format!("/key/{key_id}?remoteSystemId={remote_system_id}");
+        let p_and_q = format!("/key/{key_id}?remoteSystemID={remote_system_id}");
 
         let url = Uri::builder().scheme("https").authority(self.kp_addr.to_string()).path_and_query(p_and_q).build().map_err(|e| {
             error!("Invalid requested uri: '{}'", e);

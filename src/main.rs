@@ -9,7 +9,7 @@ use converter::{
     skip::SkipClient,
 };
 use tokio::{sync::mpsc, task::JoinSet};
-use tracing_subscriber::layer::SubscriberExt;
+use tracing::error;
 
 type AResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -17,8 +17,9 @@ type AResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync
 #[tokio::main]
 async fn main() -> AResult<()> {
     // Set up tracing for event logging
-    let subscriber = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer());
-    tracing::subscriber::set_global_default(subscriber)?;
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
 
     let matches = Command::new("QKD ETSI 014 to CISCO SKIP converter CLI")
         .about("Convert the QKD ETSI 014 KME request to a CISCO SKIP request by running a converter on both ends.")
@@ -62,7 +63,14 @@ async fn main() -> AResult<()> {
     let mut connections = JoinSet::new();
 
     loop {
-        let conn_server = server.accept().await?;
-        connections.spawn(conn_server);
+        let conn_server = server.accept().await;
+        let server=  match conn_server {
+            Ok(server) => server,
+            Err(e) => {
+                error!("Error while accepting connection: '{}'", e);
+                continue;
+            },
+        };
+        connections.spawn(server);
     }
 }

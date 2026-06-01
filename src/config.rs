@@ -52,7 +52,8 @@ pub struct ConverterConfig {
     pub cert: PathBuf,
     pub key: PathBuf,
     pub root_certs: Vec<PathBuf>,
-    pub peer_address: Option<SocketAddr>,
+    pub peer_address: SocketAddr,
+    pub peer_provider_id: String
 }
 
 #[derive(Debug)]
@@ -61,7 +62,8 @@ pub struct LoadedConverterConfig<'a> {
     pub cert_chain: Vec<CertificateDer<'a>>,
     pub key: PrivateKeyDer<'a>,
     pub root_store: RootCertStore,
-    pub peer_address: Option<SocketAddr>,
+    pub peer_address: SocketAddr,
+    pub peer_provider_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,6 +120,7 @@ impl Config {
                 key: converter_key,
                 root_store: converter_roots,
                 peer_address: converter.peer_address,
+                peer_provider_id: converter.peer_provider_id,
             },
         })
     }

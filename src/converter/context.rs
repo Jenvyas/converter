@@ -4,10 +4,16 @@ use rustls::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    net::SocketAddr, sync::Arc,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    sync::{Mutex, RwLock},
+    time::timeout,
+};
 use tokio_rustls::rustls::ClientConfig;
+use tracing::{error, info};
 
 use crate::converter::{
     client::EtsiToSkipClientHandle,
@@ -27,7 +33,7 @@ pub struct EtsiToSkipContext {
     peer_clients: Mutex<HashMap<String, client::EtsiToSkipClientHandle>>,
     tls: ClientConfig,
     connected_sae_ids: HashSet<String>,
-    provider_id: String,
+    pub provider_id: String,
 }
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -67,8 +73,10 @@ impl EtsiToSkipContext {
 
     /// Notify the converter peer of new keys.
     pub async fn send_keys(&self, sae_pair: &(String, String), keys: Vec<NewKey>) -> Option<()> {
-        let client = self.peer_clients.lock().await.get(&sae_pair.1).unwrap().clone();
-        let _ = client.new_keys(keys).await;
+        let lock = self.peer_providers.read().await;
+        let peer_id = lock.get(&sae_pair.1)?;
+        let client = self.peer_clients.lock().await.get(peer_id).unwrap().clone();
+        let _ = client.new_keys(sae_pair.clone(), keys).await;
         Some(())
     }
 
@@ -85,33 +93,39 @@ impl EtsiToSkipContext {
         self.peer_clients.lock().await.contains_key(provider_id)
     }
 
-    /// Add a peer converter and it's key provider if it isn't already in the context.
-    /// Returns True if a new peer was added
-    pub async fn add_peer(&self, provider_id: &str, addr: SocketAddr) -> Result<bool, Box<dyn std::error::Error + Sync + Send>> {
-        let contains = self.peer_clients.lock().await.contains_key(provider_id);
-        if !contains {
-            // Create a new client and map it to the key provider id
-            let client_handle = EtsiToSkipClientHandle::new(addr, &self.provider_id, self.tls.clone()).await?;
-            let (_, connected_sae) = client_handle.get_connected_sae().await?;
-            self.peer_clients.lock().await.insert(provider_id.to_string(), client_handle);
-            // Map the new SAE IDs to the key provider id
-            let mut write_lock = self.peer_providers.write().await;
-            for sae_id in connected_sae {
-                write_lock.insert(sae_id.id, provider_id.to_string());
-            }
-        }
-        Ok(!contains)
-    }
+    pub async fn connect_to_peer(
+        &self,
+        addr: SocketAddr,
+        peer_provider_id: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let client_handle = EtsiToSkipClientHandle::new(addr, peer_provider_id, &self.provider_id, self.tls.clone()).await?;
 
-    pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let client_handle = EtsiToSkipClientHandle::new(addr, &self.provider_id, self.tls.clone()).await?;
+        let (provider_id, connected_sae) = loop {
+            let result = loop {
+                match timeout(Duration::from_secs(5), client_handle.get_connected_sae()).await {
+                    Err(_) => {
+                        error!("Connected SAE request attempt to '{addr}' failed after 5 seconds. Trying again.");
+                    }
+                    Ok(result) => break result,
+                }
+            };
 
-        let (provider_id, connected_sae) = client_handle.get_connected_sae().await?;
+            let _ = match result {
+                Err(e) => {
+                    error!("Failed to request connected SAE from '{addr}': {e}");
+                    info!("Attempting connected SAE request to '{addr}' again in 5 seconds.");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+                Ok(client) => break client,
+            };
+        };
         self.peer_clients.lock().await.insert(provider_id.to_string(), client_handle);
 
         // Map the new SAE IDs to the key provider id
         let mut write_lock = self.peer_providers.write().await;
         for sae_id in connected_sae {
+            info!("Adding converter peer '{}' associated SAE '{}'", provider_id, sae_id.id);
             write_lock.insert(sae_id.id, provider_id.to_string());
         }
         Ok(())

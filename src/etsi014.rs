@@ -19,7 +19,8 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tower::Service;
-use tracing::warn;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::{info, warn};
 
 use models::GetKeysWithId;
 use x509_parser::{
@@ -99,6 +100,7 @@ impl Etsi014Server {
         let acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
         let listener = TcpListener::bind(address).await?;
+        info!("ETSI GS QKD 014 Server started listening on {address}");
 
         let app = Router::new()
             .route(concatcp!(API_VER, "/keys/{slave_SAE_ID}/status"), get(handlers::get_status))
@@ -109,6 +111,15 @@ impl Etsi014Server {
             .route(
                 concatcp!(API_VER, "/keys/{master_SAE_ID}/dec_keys"),
                 get(handlers::get_key_with_id).post(handlers::post_key_with_id),
+            )
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                    .on_response(
+                        DefaultOnResponse::new()
+                            .include_headers(true)
+                            .latency_unit(tower_http::LatencyUnit::Micros),
+                    ),
             );
 
         Ok(Etsi014Server {
@@ -123,6 +134,7 @@ impl Etsi014Server {
     /// Accept an mTLS connection and return a future that serves an ETSI QKD 014 API to the connection.
     pub async fn accept(&self) -> AResult<impl Future<Output = ()> + use<>> {
         let (tcp_stream, addr) = self.listener.accept().await?;
+        info!("New ETSI GS QKD 014 connection from '{addr}'");
         let stream = self.acceptor.accept(tcp_stream).await?;
 
         // Check if the SAE ID is valid
@@ -130,6 +142,7 @@ impl Etsi014Server {
         let cert = &conn
             .peer_certificates()
             .expect("The connection was accepted with client authentication enabled.")[0];
+
         let sae_id = extract_sae_id(&cert);
         let sae_id = match sae_id {
             Some(sae_id) if !self.valid_sae.contains(&sae_id) => {
